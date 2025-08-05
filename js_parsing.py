@@ -37,7 +37,7 @@ USER_AGENTS = [
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] - %(message)s')
 
-# === HELPERS ===
+# === FUNCTIONS ===
 def get_headers():
     return {
         'User-Agent': random.choice(USER_AGENTS),
@@ -46,8 +46,7 @@ def get_headers():
     }
 
 def make_output_dirs():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    for sub in ['ditemukan', 'tidak_ditemukan', 'gagal', 'endpoints', 'gf', 'nuclei', 'jsleak']:
+    for sub in ['ditemukan', 'tidak_ditemukan', 'gagal', 'endpoints', 'beautified']:
         os.makedirs(os.path.join(OUTPUT_DIR, sub), exist_ok=True)
 
 def decode_base64_strings(js_code):
@@ -88,33 +87,25 @@ def write_to_file(folder, filename, content):
     with open(path, 'w', encoding='utf-8') as f:
         f.write(content)
 
-def run_command(tool, input_file, out_file):
-    try:
-        if tool == 'gf':
-            for pattern in ['xss', 'sqli', 'idor', 'redirect', 'lfi']:
-                subprocess.call(f"cat {input_file} | gf {pattern} >> {out_file}", shell=True)
-        elif tool == 'nuclei':
-            subprocess.call(f"cat {input_file} | nuclei -silent -t exposed-tokens/ -o {out_file}", shell=True)
-        elif tool == 'jsleak':
-            subprocess.call(f"jsleak -f {input_file} -o {out_file}", shell=True)
-    except Exception as e:
-        logging.warning(f"{tool} error: {e}")
-
-# === MAIN LOGIC ===
 def scan_js(url):
     filename = url.replace('https://', '').replace('http://', '').replace('/', '_')
     log = f"[URL] {url}\n"
     try:
-        resp = requests.get(url, headers=get_headers(), timeout=25)
-        js = resp.text
+        resp = requests.get(url, headers=get_headers(), timeout=20)
+        status = resp.status_code
+        if status != 200:
+            write_to_file('gagal', filename + '.txt', f"❌ Failed ({status}): {url}")
+            return
 
+        js = resp.text
         if len(js.splitlines()) < 5 and len(js) > 1000:
             js = jsbeautifier.beautify(js)
+
         write_to_file('beautified', filename + '.js', js)
 
         found = False
 
-        # Sensitive
+        # === Sensitive Info
         sensitive = extract_patterns(js, SENSITIVE_PATTERNS)
         if sensitive:
             log += "\n[🔐 Sensitive Info]"
@@ -123,7 +114,7 @@ def scan_js(url):
                     log += f"\n  {k}: {val}"
             found = True
 
-        # Base64
+        # === Base64
         b64 = decode_base64_strings(js)
         if b64:
             log += "\n\n[🔓 Base64 Decoded]"
@@ -132,19 +123,19 @@ def scan_js(url):
                 log += f"\n  → {preview} (from: {raw[:20]}...)"
             found = True
 
-        # Obfuscation / Eval
+        # === Obfuscation
         obfs = match_list(js, OBFUSCATION)
         if obfs:
-            log += f"\n\n[⚠️ Obfuscated Function]: {', '.join(obfs)}"
+            log += f"\n\n[⚠️ Obfuscation]: {', '.join(obfs)}"
             found = True
 
-        # Fingerprinting
+        # === Fingerprinting
         fp = match_list(js, FINGERPRINTING)
         if fp:
             log += f"\n\n[🕵️‍♂️ Fingerprinting Detected]: {', '.join(fp)}"
             found = True
 
-        # Fetch Endpoints
+        # === Endpoints
         endpoints = extract_endpoints(js)
         if endpoints:
             log += "\n\n[📡 API Endpoints]"
@@ -155,43 +146,27 @@ def scan_js(url):
         if found:
             write_to_file('ditemukan', filename + '.txt', log)
         else:
-            write_to_file('tidak_ditemukan', filename + '.txt', "[OK] Tidak ditemukan indikasi sensitif.")
+            write_to_file('tidak_ditemukan', filename + '.txt', f"[OK] {url} - Tidak ditemukan indikasi sensitif.")
 
     except Exception as e:
-        write_to_file('gagal', filename + '.txt', f"❌ Error fetching: {url}\n{str(e)}")
+        write_to_file('gagal', filename + '.txt', f"❌ Error: {url}\n{str(e)}")
 
-# === ENTRY ===
+# === MAIN ===
 def main():
     make_output_dirs()
-    path = input("📥 Masukkan file berisi URL JS: ").strip()
-    try:
-        with open(path, 'r') as f:
-            urls = [line.strip() for line in f if line.strip().startswith('http')]
-    except FileNotFoundError:
-        logging.error("File tidak ditemukan.")
+    path = input("📥 Masukkan file URL JS (satu per baris): ").strip()
+    if not os.path.exists(path):
+        logging.error(f"File tidak ditemukan: {path}")
         return
+
+    with open(path, 'r') as f:
+        urls = [line.strip() for line in f if line.strip().startswith('http')]
 
     for url in urls:
         scan_js(url)
 
-    logging.info("✅ Scan JS selesai.")
-    
-    # Chaining tools (optional)
-    endpoints_file = os.path.join(OUTPUT_DIR, 'endpoints', 'all_endpoints.txt')
-    with open(endpoints_file, 'w') as ep_out:
-        for root, _, files in os.walk(os.path.join(OUTPUT_DIR, 'endpoints')):
-            for f in files:
-                if f.endswith('.txt'):
-                    with open(os.path.join(root, f)) as ep_in:
-                        ep_out.write(ep_in.read() + '\n')
-
-    # Run tools
-    logging.info("🔗 Running nuclei, gf, jsleak...")
-    run_command('nuclei', endpoints_file, os.path.join(OUTPUT_DIR, 'nuclei', 'result.txt'))
-    run_command('gf', endpoints_file, os.path.join(OUTPUT_DIR, 'gf', 'result.txt'))
-    run_command('jsleak', endpoints_file, os.path.join(OUTPUT_DIR, 'jsleak', 'result.txt'))
-
-    logging.info(f"📁 Semua output disimpan di folder: {OUTPUT_DIR}")
+    logging.info(f"✅ Selesai scan {len(urls)} link.")
+    logging.info(f"📁 Output disimpan di folder: {OUTPUT_DIR}")
 
 if __name__ == '__main__':
     main()
